@@ -6,6 +6,11 @@
   "engines": {
     "vscode": "^1.88.0"
   },
+  "author": "Rustam Saryev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rsaryev/simple-copilot.git"
+  },
   "categories": [
     "Other"
   ],
