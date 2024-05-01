@@ -7,11 +7,15 @@ const API_KEY_SETTING = "apiKey";
 
 class Configuration {
   static getApiKey(): string | undefined {
-    return vscode.workspace.getConfiguration(CONFIGURATION_KEY).get<string>(API_KEY_SETTING);
+    return vscode.workspace
+      .getConfiguration(CONFIGURATION_KEY)
+      .get<string>(API_KEY_SETTING);
   }
 
   static async setApiKey(apiKey: string): Promise<void> {
-    await vscode.workspace.getConfiguration(CONFIGURATION_KEY).update(API_KEY_SETTING, apiKey, true);
+    await vscode.workspace
+      .getConfiguration(CONFIGURATION_KEY)
+      .update(API_KEY_SETTING, apiKey, true);
   }
 
   static async promptForApiKey(): Promise<string | undefined> {
@@ -37,20 +41,25 @@ async function getOrPromptForApiKey(): Promise<string | undefined> {
 const buildMessages = ({
   prefix,
   suffix,
-  context,
-  error,
+  language,
 }: {
-  context: string;
   prefix: string;
   suffix: string;
-  error?: string;
+  language?: string;
 }): ChatCompletionMessageParam[] => {
   const messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: context },
+    {
+      role: "system",
+      content: "Provide an addition for the proposed code block. Each addition must be syntactically correct, error-free, logically fit the context before and after {{completions}}, and properly implement line breaks if needed.",
+    },
     { role: "user", content: `${prefix}{{completion}}${suffix}` },
   ];
-  if (error) {
-    messages.push({ role: "system", content: error });
+
+  if (language) {
+    messages.unshift({
+      role: "system",
+      content: `Set language to ${language}`,
+    });
   }
   return messages;
 };
@@ -71,45 +80,38 @@ const buildFunctionParameters = () => ({
   required: ["completions"],
 });
 
-async function autocomplete({
-  context,
+function removeCodeBlockMarkers(str: string) {
+  return str.replace(/```[\s\S]*?```/gm, "").trim();
+}
+
+async function getSuggestion({
   suffix,
   prefix,
+  language,
 }: {
-  context: string;
   suffix: string;
   prefix: string;
-}): Promise<string[]> {
+  language: string;
+}): Promise<string> {
   const apiKey = await getOrPromptForApiKey();
   if (!apiKey) {
     vscode.window.showErrorMessage("API Key is required for autocomplete.");
-    return [];
+    return "";
   }
 
   const openai = new OpenAI({
     apiKey,
   });
   const out = await openai.chat.completions.create({
-    functions: [
-      {
-        name: "autocomplete",
-        description: `Autocomplete code`,
-        parameters: buildFunctionParameters(),
-      },
-    ],
     model: "gpt-3.5-turbo",
     messages: buildMessages({
-      context,
       prefix,
       suffix,
+      language,
     }),
-    function_call: { name: "autocomplete" },
   });
 
-  return (
-    JSON.parse(out.choices[0]?.message?.function_call?.arguments || "{}")
-      .completions || []
-  );
+  return removeCodeBlockMarkers(out.choices[0]?.message.content!);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -144,7 +146,7 @@ class PromptProvider implements vscode.InlineCompletionItemProvider {
     position: vscode.Position,
     context: vscode.InlineCompletionContext,
     token: vscode.CancellationToken
-  ): Promise<vscode.InlineCompletionItem[] | undefined> {    
+  ): Promise<vscode.InlineCompletionItem[] | undefined> {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }
@@ -156,37 +158,47 @@ class PromptProvider implements vscode.InlineCompletionItemProvider {
 
     return new Promise((resolve, reject) => {
       this.debounceTimer = setTimeout(async () => {
+
         if (token.isCancellationRequested) {
-          return reject('Operation cancelled');
+          return reject("Operation cancelled");
         }
 
         this.statusBarItem.text = `$(sync~spin)`;
 
-        const currentLine = document.lineAt(position.line);
-        const prefix = currentLine.text.slice(0, position.character);
-        const suffix = currentLine.text.slice(position.character);
+        const maxLinesContext = 25;
+        const prefix = document.getText(
+          new vscode.Range(
+            new vscode.Position(
+              Math.max(0, position.line - maxLinesContext),
+              0
+            ),
+            position
+          )
+        );
+        const suffix = document.getText(
+          new vscode.Range(
+            position,
+            new vscode.Position(
+              Math.min(document.lineCount - 1, position.line + maxLinesContext),
+              0
+            )
+          )
+        );
 
-        console.log({
-          prefix,
-          suffix
-        });
-        
-        const completions = await autocomplete({
-          context: document.getText(),
+        const suggestion = await getSuggestion({
           prefix,
           suffix,
+          language: document.languageId,
         });
 
         this.statusBarItem.text = `$(chip)`;
 
-        const completionItems = completions.map((completion) => ({
-            insertText: completion,
-            range: new vscode.Range(position, position),
-        }));
-
-        this.cache.set(cacheKey, completionItems);
-
-        resolve(completionItems);
+        const items = [{
+          insertText: suggestion,
+          range: new vscode.Range(position, position),
+        }];
+        this.cache.set(cacheKey, items);
+        resolve(items);
       }, 500);
     });
   }
